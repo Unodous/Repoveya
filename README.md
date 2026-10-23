@@ -1,73 +1,58 @@
-# React + TypeScript + Vite
+# Repoveya
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A Russian-language workspace for discovering GitHub repositories, comparing alternatives, and documenting technology decisions. Built with React, TypeScript, and Vite.
 
-Currently, two official plugins are available:
+## Run locally
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Use the Node version in `.node-version` (or a compatible modern Node release):
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```sh
+npm ci
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+Open the local URL printed by Vite. No API key or environment variables are required.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```sh
+npm run check  # types, ESLint, Prettier, Vitest
+npm run build  # production output in dist/
+npm run preview
 ```
+
+## Features
+
+- Curated catalog of 12 real projects, with an explicitly dated GitHub metadata snapshot (2026-10-23).
+- Local search, category filters, and sorting by stars or last push.
+- Live public GitHub search with pagination, cancellation of obsolete requests, and rate-limit/network error messages.
+- Saved repositories with personal notes, collection assignment, and decision status.
+- Custom collections, available on desktop and mobile through the saved view.
+- Side-by-side comparison of two or three repositories, including stars, forks, open issues/PRs, language, license, and last push.
+- Markdown export of saved decisions and comparisons.
+- Light/dark themes, keyboard shortcut `/`, native modal focus trapping, and responsive layouts.
+
+## Try these flows
+
+1. Search `supabase` in the curated catalog, then clear the query and try a category filter.
+2. Search `react state management` using **Найти на GitHub**. Try another query or the next page.
+3. Save a repository, open its title, write a note, choose a collection and decision status. Reload the page and check **Сохранённое**.
+4. Create a collection in **Сохранённое**. Assign repositories to it using the detail dialog.
+5. Add two or three repositories to comparison and open **Сравнение**. Export the comparison.
+6. Export saved notes, switch theme, and test the layout at a narrow screen width.
+
+## Data and limitations
+
+This is a testable frontend MVP, with no backend, sign-in, or cross-device sync. Notes, collections, and theme are stored in this origin's `localStorage`. Clearing browser data removes them; use Markdown export for a readable backup. A different browser or domain has separate data. The application shows a warning when browser storage cannot be written.
+
+The public GitHub API is queried directly from the visitor's browser, without credentials. Its anonymous search limits apply. Search text is sent to GitHub; personal notes stay local. The curated catalog remains usable if live search is unavailable. Its statistics do not update automatically; a live search loads current results. Comparison values are captured when added. `open_issues_count` includes both open issues and pull requests. An absent license value is not a claim that the repository has no license—check its source before adoption.
+
+The interface font optionally loads from Google Fonts and falls back to system fonts if unavailable. No analytics are included.
+
+## Structure
+
+- `src/App.tsx`: workspace interface and orchestration
+- `src/domain.ts`: typed data model, persistence validation, filtering, exports, and GitHub adapter
+- `src/seed.json`: curated GitHub metadata snapshot
+- `src/Icon.tsx`: inline SVG icons
+- `src/App.test.tsx`, `src/domain.test.ts`: behavior and data-validation tests
+
+The original line-ending PR #2 is separate from this feature branch. This work does not merge or close it.
