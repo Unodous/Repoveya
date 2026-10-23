@@ -289,25 +289,30 @@ function App() {
         <nav aria-label="Основная навигация">
           <button
             className={`nav-item ${view === 'explore' ? 'active' : ''}`}
+            aria-current={view === 'explore' ? 'page' : undefined}
             onClick={() => navigate('explore')}
           >
             <Icon name="compass" />
-            Обзор
+            <span className="nav-text">Обзор</span>
             <span className="nav-dot" />
           </button>
           <button
-            className={`nav-item ${view === 'saved' && !collection ? 'active' : ''}`}
+            className={`nav-item ${view === 'saved' ? 'active' : ''}`}
+            aria-current={view === 'saved' ? 'page' : undefined}
             onClick={() => navigate('saved')}
           >
             <Icon name="bookmark" />
-            Сохранённое<span className="nav-count">{workspace.saved.length}</span>
+            <span className="nav-text">Сохранённое</span>
+            <span className="nav-count">{workspace.saved.length}</span>
           </button>
           <button
             className={`nav-item ${view === 'compare' ? 'active' : ''}`}
+            aria-current={view === 'compare' ? 'page' : undefined}
             onClick={() => navigate('compare')}
           >
             <Icon name="compare" />
-            Сравнение<span className="nav-count">{compare.length}</span>
+            <span className="nav-text">Сравнение</span>
+            <span className="nav-count">{compare.length}</span>
           </button>
         </nav>
         <div className="collection-title">
@@ -864,14 +869,16 @@ function App() {
                           <tr key={label!}>
                             <th scope="row">{label}</th>
                             {values.map((value, i) => (
-                              <td key={compare[i].id}>{value}</td>
+                              <td key={compare[i].id} data-project={compare[i].full_name}>
+                                {value}
+                              </td>
                             ))}
                           </tr>
                         ))}
                         <tr>
                           <th scope="row">Моё решение</th>
                           {compare.map((r) => (
-                            <td key={r.id}>
+                            <td key={r.id} data-project={r.full_name}>
                               <button className="secondary" onClick={() => setDetail(r)}>
                                 <Icon name="bookmark" size={16} />
                                 {savedFor(r.id)
@@ -903,6 +910,13 @@ function App() {
             <strong>На сравнение</strong>
             <span>{compare.length}/3</span>
           </div>
+          <button
+            className="icon-button mobile-clear-compare"
+            aria-label="Очистить сравнение"
+            onClick={() => setCompare([])}
+          >
+            <Icon name="close" size={18} />
+          </button>
           <div className="dock-repos">
             {compare.map((r) => (
               <span key={r.id}>
