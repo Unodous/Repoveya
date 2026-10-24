@@ -29,20 +29,28 @@ export interface Workspace {
 export const STORAGE_KEY = 'repoveya.workspace.v1'
 export const emptyWorkspace: Workspace = { saved: [], collections: ['Мой стек'] }
 
+const repositoryName = /^[a-zA-Z0-9][a-zA-Z0-9-]*\/(?!\.{1,2}$)[\w.-]+$/
+
+const count = (value: unknown) =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+
 export function isRepository(value: unknown): value is Repository {
   if (!value || typeof value !== 'object') return false
   const r = value as Record<string, unknown>
   return (
-    typeof r.id === 'number' &&
+    count(r.id) &&
+    (r.id as number) > 0 &&
     typeof r.full_name === 'string' &&
+    repositoryName.test(r.full_name) &&
     typeof r.name === 'string' &&
     typeof r.html_url === 'string' &&
-    r.html_url.startsWith('https://github.com/') &&
+    r.html_url.toLowerCase() === `https://github.com/${r.full_name}`.toLowerCase() &&
     (r.description === null || typeof r.description === 'string') &&
-    typeof r.stargazers_count === 'number' &&
-    typeof r.forks_count === 'number' &&
-    typeof r.open_issues_count === 'number' &&
+    count(r.stargazers_count) &&
+    count(r.forks_count) &&
+    count(r.open_issues_count) &&
     typeof r.updated_at === 'string' &&
+    Number.isFinite(Date.parse(r.updated_at)) &&
     (r.language === null || typeof r.language === 'string') &&
     (r.license === null || typeof r.license === 'string') &&
     Array.isArray(r.topics) &&
@@ -62,6 +70,7 @@ export function readWorkspace(): Workspace {
           s &&
           isRepository(s.repo) &&
           typeof s.note === 'string' &&
+          s.note.length <= 20000 &&
           typeof s.collection === 'string' &&
           ['exploring', 'shortlist', 'chosen'].includes(s.decision),
       ),
@@ -120,15 +129,37 @@ export function downloadFile(name: string, text: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-export async function searchGithub(query: string, sort: string, page: number, signal: AbortSignal) {
-  const params = new URLSearchParams({
-    q: `${query.trim() || 'stars:>10000'} archived:false`,
-    sort: sort === 'updated' ? 'updated' : 'stars',
-    order: 'desc',
-    per_page: '12',
-    page: String(page),
-  })
-  const response = await fetch(`https://api.github.com/search/repositories?${params}`, {
+export interface SearchFilters {
+  language: string
+  stars: string
+}
+export const SEARCH_PAGE_SIZE = 12
+// Keep every request within GitHub's first 1,000 search results.
+export const MAX_SEARCH_PAGES = Math.floor(1000 / SEARCH_PAGE_SIZE)
+
+function normalizeRepository(value: Record<string, unknown>): Repository {
+  const repo = {
+    id: value.id,
+    full_name: value.full_name,
+    name: value.name,
+    description: value.description,
+    html_url: value.html_url,
+    stargazers_count: value.stargazers_count,
+    forks_count: value.forks_count,
+    open_issues_count: value.open_issues_count,
+    language: value.language,
+    license: (value.license as { spdx_id?: string } | null)?.spdx_id || null,
+    updated_at: value.pushed_at,
+    topics: value.topics || [],
+    archived: value.archived,
+  }
+  if (!isRepository(repo))
+    throw new Error('GitHub вернул неполные данные проекта. Повторите запрос позже.')
+  return repo
+}
+
+async function githubRequest(path: string, signal: AbortSignal) {
+  const response = await fetch(`https://api.github.com/${path}`, {
     signal,
     headers: { Accept: 'application/vnd.github+json' },
   })
@@ -136,18 +167,55 @@ export async function searchGithub(query: string, sort: string, page: number, si
     throw new Error(
       response.status === 403 || response.status === 429
         ? 'GitHub временно ограничил запросы. Попробуйте позже или вернитесь к подборке.'
-        : 'Не удалось получить репозитории. Проверьте соединение и повторите поиск.',
+        : response.status === 404
+          ? 'Репозиторий не найден или закрыт. Проверьте ссылку.'
+          : response.status === 422
+            ? 'GitHub не смог обработать запрос. Уточните поисковые условия.'
+            : 'Не удалось получить репозитории. Проверьте соединение и повторите поиск.',
     )
-  const data = await response.json()
+  return response.json()
+}
+
+export async function fetchRepository(fullName: string, signal: AbortSignal) {
+  if (!repositoryName.test(fullName))
+    throw new Error('Нужна ссылка вида github.com/owner/repository.')
+  return normalizeRepository(await githubRequest(`repos/${fullName}`, signal))
+}
+
+export async function searchGithub(
+  query: string,
+  sort: string,
+  page: number,
+  signal: AbortSignal,
+  filters: SearchFilters = { language: '', stars: '' },
+) {
+  const direct = query.trim().match(/^(?:https:\/\/github\.com\/)?([\w.-]+\/[\w.-]+)\/?$/)
+  if (direct) {
+    const repo = await fetchRepository(direct[1], signal)
+    return { items: [repo], total: 1, incomplete: false, direct: true }
+  }
+  if (page < 1 || page > MAX_SEARCH_PAGES)
+    throw new Error('Достигнут предел выдачи GitHub. Уточните запрос.')
+  const qualifiers = [
+    query.trim() || (filters.stars ? '' : 'stars:>1000'),
+    'archived:false',
+    filters.language ? `language:${filters.language}` : '',
+    filters.stars ? `stars:>=${filters.stars}` : '',
+  ]
+  const params = new URLSearchParams({
+    q: qualifiers.filter(Boolean).join(' '),
+    sort: sort === 'updated' ? 'updated' : 'stars',
+    order: 'desc',
+    per_page: String(SEARCH_PAGE_SIZE),
+    page: String(page),
+  })
+  const data = await githubRequest(`search/repositories?${params}`, signal)
   if (!Array.isArray(data.items))
     throw new Error('GitHub вернул неожиданный ответ. Повторите поиск.')
-  const items: Repository[] = data.items
-    .map((r: Record<string, unknown>) => ({
-      ...r,
-      license: (r.license as { spdx_id?: string } | null)?.spdx_id || null,
-      updated_at: r.pushed_at,
-      topics: r.topics || [],
-    }))
-    .filter(isRepository)
-  return { items, total: Number(data.total_count) || 0 }
+  return {
+    items: data.items.map(normalizeRepository) as Repository[],
+    total: Number(data.total_count) || 0,
+    incomplete: Boolean(data.incomplete_results),
+    direct: false,
+  }
 }

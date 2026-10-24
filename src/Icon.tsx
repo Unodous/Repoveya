@@ -1,6 +1,11 @@
 import type { CSSProperties } from 'react'
 
 const paths: Record<string, string> = {
+  sliders: 'M4 6h6 M16 6h4 M4 18h10 M20 18h0 M13 3v6 M17 15v6 M4 12h0 M10 12h10 M7 9v6',
+  upload: 'M12 16V3 M7 8l5-5 5 5 M4 16v5h16v-5',
+  lock: 'M5 10h14v11H5V10Z M8 10V7a4 4 0 0 1 8 0v3',
+  edit: 'm15 4 5 5 M4 20l5-1L21 7l-5-5L4 14v6Z',
+  trash: 'M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7',
   compass: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M16 8l-2.5 5.5L8 16l2.5-5.5L16 8Z',
   bookmark: 'M6 4h12v17l-6-4-6 4V4Z',
   compare: 'M7 3v18 M17 3v18 M3 8h8 M13 16h8 M4 5l3 3 3-3 M14 19l3-3 3 3',

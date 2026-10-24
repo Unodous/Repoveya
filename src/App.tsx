@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
+import type { FormEvent } from 'react'
 import seed from './seed.json'
 import Icon from './Icon'
 import {
   downloadFile,
+  fetchRepository,
+  isRepository,
+  MAX_SEARCH_PAGES,
+  SEARCH_PAGE_SIZE,
   filterRepositories,
   formatNumber,
   readWorkspace,
@@ -12,7 +16,11 @@ import {
   toMarkdown,
 } from './domain'
 import type { Repository, SavedRepository, Workspace } from './domain'
+import Modal from './Modal'
+import LibraryTools from './LibraryTools'
+import { decisionLabels, renameCollection, removeCollection } from './workspace'
 import './App.css'
+import './Workspace.css'
 
 const categories = [
   ['all', 'Все проекты'],
@@ -21,7 +29,6 @@ const categories = [
   ['design', 'Дизайн и UI'],
   ['tools', 'Инструменты'],
 ]
-const decisionLabels = { exploring: 'Изучаю', shortlist: 'В шорт-листе', chosen: 'Выбран в проект' }
 const colors: Record<string, string> = {
   TypeScript: '#4b88c9',
   JavaScript: '#d7ae29',
@@ -32,62 +39,48 @@ const colors: Record<string, string> = {
 }
 const repoColors = ['#eaf4f0', '#eff1ff', '#fdf0e8', '#e8f1ff', '#f2eafa']
 
-function Modal({
-  children,
-  title,
-  onClose,
-  wide = false,
-}: {
-  children: ReactNode
-  title: string
-  onClose: () => void
-  wide?: boolean
-}) {
-  const ref = useRef<HTMLDialogElement>(null)
-  useEffect(() => {
-    const dialog = ref.current
-    const previous = document.activeElement as HTMLElement | null
-    dialog?.showModal()
-    document.body.style.overflow = 'hidden'
-    return () => {
-      dialog?.close()
-      document.body.style.overflow = ''
-      previous?.focus()
-    }
-  }, [])
-  return (
-    <dialog
-      ref={ref}
-      aria-label={title}
-      className={`modal ${wide ? 'wide' : ''}`}
-      onCancel={onClose}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
-    >
-      <div className="modal-heading">
-        <h2>{title}</h2>
-        <button className="icon-button" aria-label="Закрыть окно" onClick={onClose}>
-          <Icon name="close" />
-        </button>
-      </div>
-      {children}
-    </dialog>
-  )
+function readComparison(): Repository[] {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('repoveya.compare') || '[]')
+    return Array.isArray(saved) ? saved.filter(isRepository).slice(0, 3) : []
+  } catch {
+    return []
+  }
+}
+
+function readRoute() {
+  const params = new URLSearchParams(window.location.hash.slice(1))
+  const value = params.get('view')
+  return {
+    view: value === 'saved' || value === 'compare' ? value : 'explore',
+    collection: value === 'saved' ? params.get('collection') : null,
+  }
 }
 
 function App() {
   const [workspace, setWorkspace] = useState<Workspace>(readWorkspace)
-  const [view, setView] = useState('explore')
-  const [collection, setCollection] = useState<string | null>(null)
+  const [view, setView] = useState(() => readRoute().view)
+  const [collection, setCollection] = useState<string | null>(() => readRoute().collection)
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('all')
   const [sort, setSort] = useState('curated')
-  const [compare, setCompare] = useState<Repository[]>([])
+  const [compare, setCompare] = useState<Repository[]>(readComparison)
   const [detail, setDetail] = useState<Repository | null>(null)
   const [createCollection, setCreateCollection] = useState(false)
   const [collectionName, setCollectionName] = useState('')
   const [collectionError, setCollectionError] = useState('')
+  const [editCollection, setEditCollection] = useState<string | null>(null)
+  const [deleteCollection, setDeleteCollection] = useState<string | null>(null)
+  const [dataTools, setDataTools] = useState(false)
+  const [decisionFilter, setDecisionFilter] = useState('all')
+  const [language, setLanguage] = useState('')
+  const [minStars, setMinStars] = useState('')
+  const [removed, setRemoved] = useState<SavedRepository | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState('')
+  const detailRequest = useRef<AbortController | null>(null)
+  const [offline, setOffline] = useState(!navigator.onLine)
+
   const [toast, setToast] = useState('')
   const [storageError, setStorageError] = useState(false)
   const [live, setLive] = useState<{
@@ -96,6 +89,10 @@ function App() {
     query: string
     sort: string
     page: number
+    language: string
+    stars: string
+    incomplete: boolean
+    direct: boolean
   } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -108,13 +105,37 @@ function App() {
   })
   const request = useRef<AbortController | null>(null)
   const searchInput = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('repoveya.compare', JSON.stringify(compare))
+    } catch {
+      /* Comparison works in memory. */
+    }
+  }, [compare])
+  useEffect(() => {
+    const update = () => setOffline(!navigator.onLine)
+    window.addEventListener('online', update)
+    window.addEventListener('offline', update)
+    return () => {
+      window.removeEventListener('online', update)
+      window.removeEventListener('offline', update)
+      detailRequest.current?.abort()
+    }
+  }, [])
+  useEffect(() => {
+    if (!removed) return
+    const timer = setTimeout(() => setRemoved(null), 12000)
+    return () => clearTimeout(timer)
+  }, [removed])
 
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace))
+      // A later successful write clears an earlier quota or availability error.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setStorageError(false)
     } catch {
       // Storage failures must be visible even when the user has not edited anything.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStorageError(true)
     }
   }, [workspace])
@@ -154,21 +175,47 @@ function App() {
     request.current?.abort()
     setLoading(false)
     setError('')
+    const params = new URLSearchParams({ view: next })
+    if (name) params.set('collection', name)
+    window.history.pushState(null, '', `#${params}`)
     setView(next)
     setCollection(name)
     setQuery('')
     setCategory('all')
+    setDecisionFilter('all')
+    setLanguage('')
+    setMinStars('')
   }
+  useEffect(() => {
+    const onRouteChange = () => {
+      if (window.location.hash === '#main') return
+      const route = readRoute()
+      request.current?.abort()
+      setLoading(false)
+      setError('')
+      setView(route.view)
+      setCollection(route.collection)
+      setQuery('')
+      setCategory('all')
+      setDecisionFilter('all')
+      setLanguage('')
+      setMinStars('')
+    }
+    window.addEventListener('hashchange', onRouteChange)
+    return () => window.removeEventListener('hashchange', onRouteChange)
+  }, [])
   const savedFor = (id: number) => workspace.saved.find((s) => s.repo.id === id)
   const toggleSaved = (repo: Repository) => {
-    const exists = Boolean(savedFor(repo.id))
+    const previous = savedFor(repo.id)
+    const exists = Boolean(previous)
+    if (previous) setRemoved(previous)
     setWorkspace((w) => ({
       ...w,
       saved: exists
         ? w.saved.filter((s) => s.repo.id !== repo.id)
         : [...w.saved, { repo, note: '', collection: collection || '', decision: 'exploring' }],
     }))
-    setToast(exists ? 'Репозиторий удалён из сохранённого' : 'Сохранено в вашей библиотеке')
+    setToast(exists ? '' : 'Сохранено в вашей библиотеке')
   }
   const updateSaved = (id: number, patch: Partial<SavedRepository>) =>
     setWorkspace((w) => ({
@@ -181,7 +228,12 @@ function App() {
     else if (compare.length < 3) setCompare((items) => [...items, repo])
     else setToast('Можно сравнить до трёх репозиториев. Уберите один, чтобы добавить другой.')
   }
-  const runSearch = async (page = 1, search = query, order = sort) => {
+  const runSearch = async (
+    page = 1,
+    search = query,
+    order = sort,
+    filters = { language, stars: minStars },
+  ) => {
     request.current?.abort()
     const controller = new AbortController()
     request.current = controller
@@ -189,11 +241,18 @@ function App() {
     setError('')
     setCategory('all')
     try {
-      const result = await searchGithub(search, order, page, controller.signal)
-      if (!controller.signal.aborted) setLive({ ...result, query: search, sort: order, page })
+      const result = await searchGithub(search, order, page, controller.signal, filters)
+      if (!controller.signal.aborted)
+        setLive({ ...result, ...filters, query: search, sort: order, page })
     } catch (e) {
       if (!controller.signal.aborted)
-        setError(e instanceof Error ? e.message : 'Не удалось выполнить поиск.')
+        setError(
+          e instanceof TypeError
+            ? 'Нет соединения с GitHub. Проверьте интернет и повторите поиск.'
+            : e instanceof Error
+              ? e.message
+              : 'Не удалось выполнить поиск.',
+        )
     } finally {
       if (!controller.signal.aborted) setLoading(false)
     }
@@ -209,14 +268,40 @@ function App() {
     setLoading(false)
     setError('')
     setCategory('all')
+    setLanguage('')
+    setMinStars('')
   }
   const source =
     view === 'saved'
       ? workspace.saved
-          .filter((s) => collection === null || s.collection === collection)
+          .filter(
+            (s) =>
+              (collection === null || s.collection === collection) &&
+              (decisionFilter === 'all' || s.decision === decisionFilter),
+          )
           .map((s) => s.repo)
       : live?.items || (seed as Repository[])
-  const filtered = filterRepositories(source, view === 'explore' && live ? '' : query, category)
+  const filtered = filterRepositories(
+    source,
+    view === 'explore' && live ? '' : view === 'saved' ? '' : query,
+    category,
+  ).filter((r) => {
+    // Server filters apply to the full GitHub result set, not just one loaded page.
+    if (
+      !(view === 'explore' && live) &&
+      ((language && r.language !== language) || r.stargazers_count < Number(minStars))
+    )
+      return false
+    if (view !== 'saved' || !query.trim()) return true
+    const saved = savedFor(r.id)
+    const text =
+      `${r.full_name} ${r.description || ''} ${r.language || ''} ${r.topics.join(' ')} ${saved?.note || ''} ${saved?.collection || ''}`.toLowerCase()
+    return query
+      .toLowerCase()
+      .trim()
+      .split(/\s+/)
+      .every((word) => text.includes(word))
+  })
   const repos =
     sort === 'curated'
       ? filtered
@@ -240,17 +325,74 @@ function App() {
       setCollectionError('Введите название коллекции.')
       return
     }
-    if (workspace.collections.some((c) => c.toLowerCase() === name.toLowerCase())) {
+    if (
+      workspace.collections.some(
+        (c) => c !== editCollection && c.toLowerCase() === name.toLowerCase(),
+      )
+    ) {
       setCollectionError('Коллекция с таким названием уже есть.')
       return
     }
-    setWorkspace((w) => ({ ...w, collections: [...w.collections, name] }))
+    setWorkspace((w) =>
+      editCollection
+        ? renameCollection(w, editCollection, name)
+        : { ...w, collections: [...w.collections, name] },
+    )
+    setEditCollection(null)
     setCreateCollection(false)
     setCollectionName('')
     setCollectionError('')
     navigate('saved', name)
   }
   const detailSaved = detail ? savedFor(detail.id) : undefined
+  const openDetail = (repo: Repository) => {
+    detailRequest.current?.abort()
+    setRefreshing(false)
+    setRefreshError('')
+    setDetail(repo)
+  }
+  const closeDetail = () => {
+    detailRequest.current?.abort()
+    setDetail(null)
+    setRefreshing(false)
+  }
+  const refreshDetail = async () => {
+    if (!detail) return
+    detailRequest.current?.abort()
+    const controller = new AbortController()
+    detailRequest.current = controller
+    setRefreshing(true)
+    setRefreshError('')
+    try {
+      const repo = await fetchRepository(detail.full_name, controller.signal)
+      if (controller.signal.aborted) return
+      setDetail(repo)
+      setWorkspace((w) => ({
+        ...w,
+        saved: w.saved.map((s) => (s.repo.id === repo.id ? { ...s, repo } : s)),
+      }))
+      setCompare((repos) => repos.map((r) => (r.id === repo.id ? repo : r)))
+      setLive((value) =>
+        value ? { ...value, items: value.items.map((r) => (r.id === repo.id ? repo : r)) } : value,
+      )
+      setToast('Данные проекта обновлены с GitHub')
+    } catch (e) {
+      if (!controller.signal.aborted)
+        setRefreshError(
+          e instanceof TypeError
+            ? 'Нет соединения с GitHub. Ваши заметки сохранены.'
+            : e instanceof Error
+              ? e.message
+              : 'Не удалось обновить данные.',
+        )
+    } finally {
+      if (!controller.signal.aborted) setRefreshing(false)
+    }
+  }
+  const collectionSaved = workspace.saved.filter(
+    (s) => collection === null || s.collection === collection,
+  )
+
   const title =
     view === 'explore'
       ? 'Обзор репозиториев'
@@ -379,7 +521,7 @@ function App() {
             <strong>{title}</strong>
           </div>
           <div className="topbar-right">
-            <span className="beta">BETA 0.1</span>
+            <span className="beta">WORKSPACE 0.2</span>
             <a
               href="https://github.com/Unodous/Repoveya"
               target="_blank"
@@ -394,11 +536,21 @@ function App() {
             </span>
           </div>
         </header>
-        <main id="main" className={view !== 'compare' && compare.length ? 'has-dock' : ''}>
+        <main
+          id="main"
+          tabIndex={-1}
+          className={`${view !== 'compare' && compare.length ? 'has-dock' : ''} ${view === 'saved' ? 'library-main' : ''}`}
+        >
           {storageError && (
             <div className="notice error" role="alert">
-              Хранилище браузера недоступно. Изменения действуют только до перезагрузки. Скачайте
-              заметки, чтобы не потерять их.
+              Хранилище браузера недоступно. Изменения действуют только до перезагрузки. Откройте
+              «Ваши данные» и скачайте резервную копию, чтобы не потерять их.
+            </div>
+          )}
+          {offline && (
+            <div className="notice" role="status">
+              <Icon name="info" size={18} /> Вы не в сети. Подборка, сохранённые проекты и заметки
+              доступны; поиск GitHub заработает после подключения.
             </div>
           )}
           {view === 'explore' && (
@@ -479,37 +631,91 @@ function App() {
               <p>
                 {collection
                   ? 'Инструменты и решения для одной идеи.'
-                  : 'Репозитории, к которым стоит вернуться. И причины, по которым вы их выбрали.'}
+                  : 'Сохранённые проекты и контекст ваших решений.'}
               </p>
             </div>
           )}
 
           {view === 'saved' && (
-            <div className="collection-manager">
-              <label>
-                Коллекция
-                <select
-                  aria-label="Фильтр коллекций"
-                  value={collection || ''}
-                  onChange={(e) => navigate('saved', e.target.value || null)}
+            <>
+              <div className="library-overview">
+                {[['all', 'Всего проектов'], ...Object.entries(decisionLabels)].map(
+                  ([id, label]) => (
+                    <button
+                      key={id}
+                      className={`summary-card ${decisionFilter === id ? 'selected' : ''}`}
+                      aria-pressed={decisionFilter === id}
+                      onClick={() => setDecisionFilter(id)}
+                    >
+                      <span>{label}</span>
+                      <strong>
+                        {id === 'all'
+                          ? collectionSaved.length
+                          : collectionSaved.filter((s) => s.decision === id).length}
+                      </strong>
+                      <i className={`decision-dot ${id}`} />
+                    </button>
+                  ),
+                )}
+              </div>
+              <div className="library-actions">
+                <span>
+                  <Icon name="lock" size={15} /> Ваша библиотека, на вашем устройстве
+                </span>
+                <button className="secondary" onClick={() => setDataTools(true)}>
+                  <Icon name="download" size={16} /> Ваши данные
+                </button>
+              </div>
+              <div className="collection-manager">
+                <label>
+                  Коллекция
+                  <select
+                    aria-label="Фильтр коллекций"
+                    value={collection || ''}
+                    onChange={(e) => navigate('saved', e.target.value || null)}
+                  >
+                    <option value="">Все сохранённые</option>
+                    {workspace.collections.map((c) => (
+                      <option key={c}>{c}</option>
+                    ))}
+                  </select>
+                </label>
+                {collection && (
+                  <div className="collection-controls">
+                    <button
+                      className="icon-button"
+                      aria-label="Переименовать коллекцию"
+                      onClick={() => {
+                        setEditCollection(collection)
+                        setCollectionName(collection)
+                        setCollectionError('')
+                        setCreateCollection(true)
+                      }}
+                    >
+                      <Icon name="edit" size={17} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      aria-label="Удалить коллекцию"
+                      onClick={() => setDeleteCollection(collection)}
+                    >
+                      <Icon name="trash" size={17} />
+                    </button>
+                  </div>
+                )}
+                <button
+                  className="secondary new-collection-button"
+                  aria-label="Новая коллекция"
+                  onClick={() => {
+                    setCreateCollection(true)
+                    setCollectionError('')
+                  }}
                 >
-                  <option value="">Все сохранённые</option>
-                  {workspace.collections.map((c) => (
-                    <option key={c}>{c}</option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className="secondary"
-                onClick={() => {
-                  setCreateCollection(true)
-                  setCollectionError('')
-                }}
-              >
-                <Icon name="plus" size={16} />
-                Новая коллекция
-              </button>
-            </div>
+                  <Icon name="plus" size={16} />
+                  <span className="new-collection-label">Новая коллекция</span>
+                </button>
+              </div>
+            </>
           )}
           {view !== 'compare' && (
             <>
@@ -520,8 +726,8 @@ function App() {
                   aria-label="Поиск репозиториев"
                   placeholder={
                     view === 'explore'
-                      ? 'Что создадим? React, база данных, UI-компоненты…'
-                      : 'Найти среди сохранённого…'
+                      ? 'Название, тема или ссылка GitHub'
+                      : 'Поиск по проектам и заметкам…'
                   }
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
@@ -545,6 +751,77 @@ function App() {
                   </button>
                 )}
               </form>
+              {view === 'explore' && (
+                <details className="search-filters">
+                  <summary>
+                    <Icon name="sliders" size={17} /> Уточнить поиск{' '}
+                    <span>
+                      {[language, minStars ? `от ${minStars} звёзд` : '']
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </span>
+                    <Icon name="chevron" size={15} />
+                  </summary>
+                  <div className="search-options">
+                    <label>
+                      Язык
+                      <select
+                        aria-label="Язык программирования"
+                        value={language}
+                        onChange={(e) => setLanguage(e.target.value)}
+                      >
+                        <option value="">Любой</option>
+                        {[
+                          'TypeScript',
+                          'JavaScript',
+                          'Python',
+                          'Rust',
+                          'Go',
+                          'Java',
+                          'C++',
+                          'C#',
+                          'CSS',
+                        ].map((l) => (
+                          <option key={l}>{l}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Звёзды
+                      <select
+                        aria-label="Минимум звёзд"
+                        value={minStars}
+                        onChange={(e) => setMinStars(e.target.value)}
+                      >
+                        <option value="">Любое число</option>
+                        <option value="100">От 100</option>
+                        <option value="1000">От 1 000</option>
+                        <option value="10000">От 10 000</option>
+                      </select>
+                    </label>
+                    <span className="search-hint">Можно вставить ссылку на репозиторий</span>
+                  </div>{' '}
+                  <div className="discovery-shortcuts" aria-label="Идеи для поиска">
+                    <span>С чего начать</span>
+                    {[
+                      ['react state management', 'Управление состоянием'],
+                      ['topic:ui-components', 'UI-компоненты'],
+                      ['topic:database', 'Базы данных'],
+                    ].map(([q, label]) => (
+                      <button
+                        key={q}
+                        onClick={() => {
+                          setQuery(q)
+                          void runSearch(1, q)
+                        }}
+                      >
+                        {label}
+                        <Icon name="arrow" size={13} />
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              )}
               <div className="catalog-toolbar">
                 <div className="category-tabs" aria-label="Категории">
                   {categories.map(([id, label]) => (
@@ -563,7 +840,14 @@ function App() {
                   <select
                     aria-label="Сортировка"
                     value={sort}
-                    onChange={(e) => setSort(e.target.value)}
+                    onChange={(e) => {
+                      setSort(e.target.value)
+                      if (view === 'explore' && live)
+                        void runSearch(1, live.query, e.target.value, {
+                          language: live.language,
+                          stars: live.stars,
+                        })
+                    }}
                   >
                     <option value="curated">По умолчанию</option>
                     <option value="stars">По звёздам</option>
@@ -571,6 +855,30 @@ function App() {
                   </select>
                 </label>
               </div>
+              {view === 'explore' && live && category !== 'all' && (
+                <p className="filter-explanation">
+                  Категория фильтрует текущую страницу результатов.
+                </p>
+              )}
+              {view === 'saved' && (decisionFilter !== 'all' || category !== 'all' || query) && (
+                <div className="active-filters">
+                  <span>
+                    {decisionFilter !== 'all'
+                      ? decisionLabels[decisionFilter as SavedRepository['decision']]
+                      : 'Фильтр библиотеки'}
+                  </span>
+                  <button
+                    className="text-button"
+                    onClick={() => {
+                      setDecisionFilter('all')
+                      setCategory('all')
+                      setQuery('')
+                    }}
+                  >
+                    Сбросить фильтры <Icon name="close" size={14} />
+                  </button>
+                </div>
+              )}
               <div className="results-heading">
                 <div>
                   <h3>
@@ -619,10 +927,22 @@ function App() {
                   </button>
                 </div>
               )}
-              {view === 'explore' && live && query !== live.query && (
+              {view === 'explore' &&
+                live &&
+                (query !== live.query || language !== live.language || minStars !== live.stars) && (
+                  <div className="notice">
+                    Показаны результаты предыдущего запроса. Нажмите «Найти на GitHub», чтобы
+                    обновить поиск.
+                  </div>
+                )}
+              {view === 'explore' && live?.direct && (
+                <p className="filter-explanation">
+                  Открыт точный репозиторий по ссылке. Фильтры языка и звёзд к нему не применяются.
+                </p>
+              )}
+              {view === 'explore' && live?.incomplete && (
                 <div className="notice">
-                  Показаны результаты предыдущего запроса. Нажмите «Найти на GitHub», чтобы обновить
-                  поиск.
+                  GitHub вернул неполные результаты. Уточните запрос или повторите поиск.
                 </div>
               )}
               <div className={`repo-grid ${loading ? 'is-loading' : ''}`} aria-busy={loading}>
@@ -645,7 +965,7 @@ function App() {
                         <Icon name="bookmark" size={19} />
                       </button>
                     </div>
-                    <button className="repo-title" onClick={() => setDetail(repo)}>
+                    <button className="repo-title" onClick={() => openDetail(repo)}>
                       {repo.name}
                       <Icon name="arrow" size={17} />
                     </button>
@@ -680,6 +1000,12 @@ function App() {
                         {repo.language || 'Не указан'}
                       </span>
                     </div>
+                    {view === 'saved' && savedFor(repo.id)?.note && (
+                      <button className="card-note" onClick={() => openDetail(repo)}>
+                        <Icon name="edit" size={14} />
+                        <span>{savedFor(repo.id)?.note}</span>
+                      </button>
+                    )}
                     <div className="repo-card-footer">
                       <span>
                         {savedFor(repo.id) ? (
@@ -715,26 +1041,34 @@ function App() {
                     <Icon name={view === 'saved' ? 'bookmark' : 'search'} size={30} />
                   </span>
                   <h2>
-                    {view === 'saved' && !query
+                    {view === 'saved' && !collectionSaved.length && !query
                       ? 'Здесь начинается ваш стек'
                       : 'Пока ничего не нашлось'}
                   </h2>
                   <p>
-                    {view === 'saved'
+                    {view === 'saved' && !collectionSaved.length
                       ? 'Сохраняйте проекты значком закладки. В карточке можно добавить заметку и выбрать коллекцию.'
                       : 'Попробуйте другой запрос или уберите фильтр категории.'}
                   </p>
                   <button
                     className="primary"
                     onClick={() => {
-                      if (view === 'saved') navigate('explore')
-                      else {
+                      if (view === 'saved' && !collectionSaved.length) navigate('explore')
+                      else if (view === 'saved') {
+                        setQuery('')
+                        setCategory('all')
+                        setDecisionFilter('all')
+                      } else {
                         setCategory('all')
                         resetCatalog()
                       }
                     }}
                   >
-                    {view === 'saved' ? 'Открыть каталог' : 'Вернуться к подборке'}
+                    {view === 'saved'
+                      ? collectionSaved.length
+                        ? 'Сбросить фильтры'
+                        : 'Открыть каталог'
+                      : 'Вернуться к подборке'}
                     <Icon name="arrow" size={17} />
                   </button>
                 </div>
@@ -744,15 +1078,35 @@ function App() {
                   <button
                     className="secondary"
                     disabled={live.page <= 1 || loading}
-                    onClick={() => void runSearch(live.page - 1, live.query, live.sort)}
+                    onClick={() =>
+                      void runSearch(live.page - 1, live.query, live.sort, {
+                        language: live.language,
+                        stars: live.stars,
+                      })
+                    }
                   >
                     ← Назад
                   </button>
-                  <span>Страница {live.page} · максимум 84 страницы GitHub</span>
+                  <span>
+                    Страница {live.page} из{' '}
+                    {Math.max(
+                      1,
+                      Math.min(MAX_SEARCH_PAGES, Math.ceil(live.total / SEARCH_PAGE_SIZE)),
+                    )}
+                  </span>
                   <button
                     className="secondary"
-                    disabled={live.page * 12 >= Math.min(live.total, 1000) || loading}
-                    onClick={() => void runSearch(live.page + 1, live.query, live.sort)}
+                    disabled={
+                      live.page >= MAX_SEARCH_PAGES ||
+                      live.page * SEARCH_PAGE_SIZE >= live.total ||
+                      loading
+                    }
+                    onClick={() =>
+                      void runSearch(live.page + 1, live.query, live.sort, {
+                        language: live.language,
+                        stars: live.stars,
+                      })
+                    }
                   >
                     Далее →
                   </button>
@@ -833,7 +1187,7 @@ function App() {
                                 <Icon name="close" size={16} />
                               </button>
                               <span className="compare-owner">{r.full_name.split('/')[0]}</span>
-                              <button className="repo-title" onClick={() => setDetail(r)}>
+                              <button className="repo-title" onClick={() => openDetail(r)}>
                                 {r.name}
                               </button>
                               <a href={r.html_url} target="_blank" rel="noreferrer">
@@ -879,11 +1233,11 @@ function App() {
                           <th scope="row">Моё решение</th>
                           {compare.map((r) => (
                             <td key={r.id} data-project={r.full_name}>
-                              <button className="secondary" onClick={() => setDetail(r)}>
+                              <button className="secondary" onClick={() => openDetail(r)}>
                                 <Icon name="bookmark" size={16} />
                                 {savedFor(r.id)
                                   ? decisionLabels[savedFor(r.id)!.decision]
-                                  : 'Сохранить и обсудить'}
+                                  : 'Добавить решение'}
                               </button>
                             </td>
                           ))}
@@ -939,7 +1293,52 @@ function App() {
           </button>
         </div>
       )}
-      {toast && (
+      {removed && (
+        <div className="undo-bar" role="status">
+          <span>
+            <strong>{removed.repo.name}</strong> удалён из сохранённого
+          </span>
+          <button
+            onClick={() => {
+              setWorkspace((w) => ({
+                ...w,
+                saved: w.saved.some((s) => s.repo.id === removed.repo.id)
+                  ? w.saved.map((s) =>
+                      s.repo.id === removed.repo.id
+                        ? {
+                            ...removed,
+                            collection: w.collections.includes(removed.collection)
+                              ? removed.collection
+                              : '',
+                          }
+                        : s,
+                    )
+                  : [
+                      ...w.saved,
+                      {
+                        ...removed,
+                        collection: w.collections.includes(removed.collection)
+                          ? removed.collection
+                          : '',
+                      },
+                    ],
+              }))
+              setRemoved(null)
+              setToast('Проект и заметки восстановлены')
+            }}
+          >
+            Вернуть
+          </button>
+          <button
+            className="icon-button"
+            aria-label="Закрыть уведомление об удалении"
+            onClick={() => setRemoved(null)}
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
+      {toast && !removed && (
         <div className="toast" role="status">
           <Icon name="check" size={18} />
           {toast}
@@ -947,7 +1346,7 @@ function App() {
       )}
 
       {detail && (
-        <Modal title={detail.full_name} onClose={() => setDetail(null)} wide>
+        <Modal title={detail.full_name} onClose={closeDetail} wide>
           <p className="detail-description">{detail.description}</p>
           <div className="detail-metrics">
             <span>
@@ -974,6 +1373,32 @@ function App() {
               {compare.some((r) => r.id === detail.id) ? 'Убрать из сравнения' : 'Сравнить'}
             </button>
           </div>
+          {removed?.repo.id === detail.id && !detailSaved && (
+            <div className="notice">
+              <span>Проект удалён вместе с заметками.</span>
+              <button
+                className="text-button"
+                onClick={() => {
+                  setWorkspace((w) => ({
+                    ...w,
+                    saved: [
+                      ...w.saved,
+                      {
+                        ...removed,
+                        collection: w.collections.includes(removed.collection)
+                          ? removed.collection
+                          : '',
+                      },
+                    ],
+                  }))
+                  setRemoved(null)
+                  setToast('Проект и заметки восстановлены')
+                }}
+              >
+                Вернуть проект и заметки
+              </button>
+            </div>
+          )}
           <div className="detail-divider" />
           <div className="section-label">
             <h3>Контекст вашего выбора</h3>
@@ -1038,14 +1463,68 @@ function App() {
               </p>
             </div>
           )}
+          {refreshError && (
+            <div className="notice error" role="alert">
+              {refreshError}
+            </div>
+          )}
+          <div className="detail-refresh">
+            <button
+              className="text-button"
+              disabled={refreshing}
+              onClick={() => void refreshDetail()}
+            >
+              <Icon name="refresh" size={16} />
+              {refreshing ? 'Обновляем…' : 'Обновить данные с GitHub'}
+            </button>
+            {detail.archived && <span className="archive-tag">Проект в архиве</span>}
+          </div>
           <div className="detail-foot">
             Последний push: {new Date(detail.updated_at).toLocaleDateString('ru-RU')} · Лицензия:{' '}
             {detail.license && detail.license !== 'NOASSERTION' ? detail.license : 'не указана'}
           </div>
         </Modal>
       )}
+      {dataTools && (
+        <LibraryTools
+          workspace={workspace}
+          setWorkspace={setWorkspace}
+          onClose={() => setDataTools(false)}
+        />
+      )}
+      {deleteCollection && (
+        <Modal title="Удалить коллекцию?" onClose={() => setDeleteCollection(null)}>
+          <p className="modal-description">
+            Коллекция «{deleteCollection}» будет удалена. Репозитории, заметки и решения останутся в
+            сохранённом, без коллекции.
+          </p>
+          <div className="dialog-actions">
+            <button className="secondary" onClick={() => setDeleteCollection(null)}>
+              Оставить
+            </button>
+            <button
+              className="primary"
+              onClick={() => {
+                setWorkspace((w) => removeCollection(w, deleteCollection))
+                setDeleteCollection(null)
+                navigate('saved')
+                setToast('Коллекция удалена. Проекты и заметки сохранены.')
+              }}
+            >
+              Удалить коллекцию
+            </button>
+          </div>
+        </Modal>
+      )}
       {createCollection && (
-        <Modal title="Новая коллекция" onClose={() => setCreateCollection(false)}>
+        <Modal
+          title={editCollection ? 'Переименовать коллекцию' : 'Новая коллекция'}
+          onClose={() => {
+            setCreateCollection(false)
+            setEditCollection(null)
+            setCollectionName('')
+          }}
+        >
           <p className="modal-description">
             Объедините инструменты одного проекта или направления.
           </p>
@@ -1069,7 +1548,8 @@ function App() {
               </p>
             )}
             <button className="primary modal-submit">
-              Создать коллекцию <Icon name="plus" size={17} />
+              {editCollection ? 'Сохранить название' : 'Создать коллекцию'}{' '}
+              <Icon name="plus" size={17} />
             </button>
           </form>
         </Modal>
